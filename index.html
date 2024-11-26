@@ -1,0 +1,632 @@
+<!DOCTYPE html>
+<html>
+	<head>
+		<title>Demo</title>
+		<script type="text/javascript" src="https://flyover.github.io/imgui-js/dist/imgui.umd.js"></script>
+		<script type="text/javascript" src="https://flyover.github.io/imgui-js/dist/imgui_impl.umd.js"></script>
+		<script src="https://unpkg.com/deck.gl@8.9.36/dist.min.js"></script>
+		<style>
+			html, body {
+				margin: 0;
+				padding: 0;
+				height: 100vh;
+			}
+		</style>
+	</head>
+	<body>
+		<script>
+			let state = {
+				done: false,
+				clearColor: null,
+				deckGL: null,
+				controller: null,
+				mapOptions: {
+					showTiles: true,
+					showFlowMap: true
+				},
+				flowLayerData: {
+					vertices: null,
+					showDepth: false,
+					depthScale: 1,
+					time: 0,
+					uAttributeData: null,
+					vAttributeData: null
+				}
+			};
+
+			async function main() {
+				state.deckGL = new deck.DeckGL({
+					id: 'map-view',
+					//canvas: canvas,
+					controller: true,
+					views: new deck.MapView({repeat: true}),
+					initialViewState: {
+						latitude: -36.8509,
+						longitude: 174.7645,
+						zoom: 8,
+						bearing: 0,
+						pitch: 30,
+						minPitch: 0,
+						maxPitch: 80,
+						farZMultiplier: 1000.0,
+					},
+					layers: []
+				});
+
+				const canvas = state.deckGL.getCanvas();
+
+				window.addEventListener("resize", () => {
+					canvas.width = window.innerWidth;
+    				canvas.height = window.innerHeight;
+				});
+
+				await ImGui.default();
+
+				ImGui.CreateContext();
+				ImGui_Impl.Init(canvas);
+
+				ImGui.StyleColorsDark();
+
+				state.clearColor = new ImGui.ImVec4(0.45, 0.55, 0.60, 1.00);
+
+				window.requestAnimationFrame(state.done ? cleanup : update);
+				update(0);
+
+				state.flowLayerData.vertices = await fetchVertices();
+				const timestepData = await fetchTimeStepData();
+				state.flowLayerData.uAttributeData = timestepData.uBuffer;
+				state.flowLayerData.vAttributeData = timestepData.vBuffer;
+			}
+
+			function update(time) {
+				state.flowLayerData.time = time/1000.0;
+				//console.log({ time: state.flowLayerData.time })
+
+				ImGui_Impl.NewFrame(time);
+				ImGui.NewFrame();
+
+				ImGui.SetNextWindowPos(new ImGui.ImVec2(20, 20), ImGui.Cond.FirstUseEver);
+				ImGui.SetNextWindowSize(new ImGui.ImVec2(294, 140), ImGui.Cond.FirstUseEver);
+					
+					if (ImGui.BeginMainMenuBar()) {
+						if (ImGui.BeginMenu("File")) {
+							if (ImGui.MenuItem("New", "CTRL+N")) {}
+							ImGui.EndMenu();
+						}
+						if (ImGui.BeginMenu("Edit")) {
+							if (ImGui.MenuItem("Undo", "CTRL+Z")) {}
+							if (ImGui.MenuItem("Redo", "CTRL+Y", false, false)) {}  // Disabled item
+							ImGui.Separator();
+							if (ImGui.MenuItem("Cut", "CTRL+X")) {}
+							if (ImGui.MenuItem("Copy", "CTRL+C")) {}
+							if (ImGui.MenuItem("Paste", "CTRL+V")) {}
+							ImGui.EndMenu();
+						}
+						ImGui.EndMainMenuBar();
+					}
+
+
+					ImGui.Begin("Debug");
+						ImGui.Checkbox("Show tiles", (_ = state.mapOptions.showTiles) => state.mapOptions.showTiles = _);
+						ImGui.Checkbox("Show flow map", (_ = state.mapOptions.showFlowMap) => state.mapOptions.showFlowMap = _);
+					ImGui.End();
+				ImGui.EndFrame();
+
+				ImGui.Render();
+
+
+				state.deckGL.setProps({ layers: updateMapLayers() });
+				state.deckGL.redraw(true);
+
+				ImGui_Impl.RenderDrawData(ImGui.GetDrawData());
+
+				window.requestAnimationFrame(state.done ? cleanup : update);
+			}
+
+			function updateMapLayers() {
+				const layers = [];
+				if (state.mapOptions.showTiles) {
+					layers.push(new deck.TileLayer({
+						id: 'tile-layer',
+						data: [
+						'https://api.mapbox.com/styles/v1/mapbox/satellite-v9/tiles/{z}/{x}/{y}?access_token=pk.eyJ1IjoiZGhpZ3JvdXBhdSIsImEiOiJja2ZkYTdxbDUwMXoxMnJwMng2a21ibHFtIn0.7TPV97kxQvD5xX5eai6PGQ'
+						],
+						maxRequests: 20,
+						pickable: false,
+						highlightColor: [60, 60, 60, 40],
+						minZoom: 0,
+						maxZoom: 19,
+						tileSize: 256,
+						zoomOffset: devicePixelRatio === 1 ? -1 : 0,
+						renderSubLayers: props => {
+							const {
+								bbox: { west, south, east, north }
+							} = props.tile;
+
+							return [
+								new deck.BitmapLayer(props, {
+									data: null,
+									image: props.data,
+									bounds: [west, south, east, north],
+									parameters: { depthTest: false }
+								}),
+							];
+						},
+						parameters: { depthTest: false }
+					}));
+				}
+				if (state.mapOptions.showFlowMap && state.flowLayerData.vertices !== null && state.flowLayerData.uAttributeData !== null && state.flowLayerData.vAttributeData !== null) {
+					layers.push(new DFSULayer({
+						id: `Example Binary Grid Layer`,
+						verticesBuffer: state.flowLayerData.vertices,
+						dfsValuesBufferA: state.flowLayerData.uAttributeData,
+						dfsValuesBufferB: state.flowLayerData.vAttributeData,
+						time: state.flowLayerData.time,
+						parameters: { depthTest: true }
+					}));
+				}
+
+				return layers;
+			}
+
+			function cleanup() {
+				ImGui_Impl.Shutdown();
+				ImGui.DestroyContext();
+			}
+
+
+			async function fetchVertices() {
+				const response = await fetch('area-full-vertices.bin', { method: "GET" });
+				const vboBuffer = await response.arrayBuffer();
+				const vbo = new Float32Array(vboBuffer);
+				return vbo;
+			}
+
+			async function fetchTimeStepData() {
+				const responseU = await fetch('area-full-timestep-0-u.bin', { method: "GET" });
+				const uArrayBuffer = await responseU.arrayBuffer();
+				const uBuffer = new Float32Array(uArrayBuffer);
+
+				const responseV = await fetch('area-full-timestep-0-v.bin', { method: "GET" });
+				const vArrayBuffer = await responseV.arrayBuffer();
+				const vBuffer = new Float32Array(vArrayBuffer);
+				// for (let i = 0; i < vBuffer.length; ++i) {
+				// 	vBuffer[i] = 0
+				// }
+
+				return {
+					uBuffer: expandBuffer(uBuffer),
+					vBuffer: expandBuffer(vBuffer),
+				};
+			}
+
+			function expandBuffer(dfsValuesBuffer) {
+			    const attributeBuffer = new Float32Array(dfsValuesBuffer.length * 3);
+			    let j = 0;
+			    for (let i = 0; i < dfsValuesBuffer.length; ++i) {
+			        const value = dfsValuesBuffer[i];
+			        attributeBuffer[j++] = value;
+			        attributeBuffer[j++] = value;
+			        attributeBuffer[j++] = value;
+			    }
+			    return attributeBuffer;
+			}
+
+class DFSULayer extends deck.Layer {
+    getShaders() {
+        const vs = getVertexShader();
+        const fs = getFragmentShader();
+        return super.getShaders({ vs, fs, modules: [deck.project, deck.project32, deck.picking] });
+    }
+
+    initializeState() {
+        const attributeManager = this.getAttributeManager();
+        const noAlloc = true;
+
+        attributeManager.add({
+            positions: {
+                size: 3,
+                type: 0x1406, // luma.GL.FLOAT,
+                fp64: this.use64bitPositions(),
+                update: (attribute) => (attribute.value = this.state.mesh.positions),
+                noAlloc,
+            },
+            dfs_values_a: {
+                size: 1,
+                type: 0x1406, // luma.GL.FLOAT,
+                update: (attribute) => (attribute.value = this.state.mesh.dfs_values_a),
+                noAlloc,
+            },
+            dfs_values_b: {
+                size: 1,
+                type: 0x1406, // luma.GL.FLOAT,
+                update: (attribute) => (attribute.value = this.state.mesh.dfs_values_b),
+                noAlloc,
+            },
+        });
+
+        const mesh = this._createMesh();
+        this.setState({
+            mesh,
+            ...this._getCoordinateUniforms()
+        });
+    }
+
+    updateState({ props, oldProps, changeFlags }) {
+        // setup model first
+        if (changeFlags.extensionsChanged) {
+            const { gl } = this.context;
+            if (this.state.model) {
+                this.state.model.delete();
+            }
+            this.setState({ model: this._getModel(gl) });
+            this.getAttributeManager().invalidateAll();
+        }
+
+        const attributeManager = this.getAttributeManager();
+
+        if (props.dfsValuesBufferA !== oldProps.dfsValuesBufferA || props.dfsValuesBufferB !== oldProps.dfsValuesBufferB) {
+            const mesh = this._createMesh();
+            attributeManager.invalidate("dfs_values_a");
+            attributeManager.invalidate("dfs_values_b");
+            this.setState({ mesh });
+        }
+
+        if (props._imageCoordinateSystem !== oldProps._imageCoordinateSystem) {
+            this.setState(this._getCoordinateUniforms());
+        }
+    }
+
+    // Override base Layer multi-depth picking logic
+    disablePickingIndex() {
+        this.setState({ disablePicking: true });
+    }
+
+    restorePickingColors() {
+        this.setState({ disablePicking: false });
+    }
+
+    _createMesh() {
+        const { verticesBuffer, dfsValuesBufferA, dfsValuesBufferB } = this.props;
+
+        return {
+            vertexCount: verticesBuffer.length / 3,
+            positions: verticesBuffer,
+            dfs_values_a: dfsValuesBufferA,
+            dfs_values_b: dfsValuesBufferB,
+        };
+    }
+
+    _getModel(gl) {
+        if (!gl) {
+            return null;
+        }
+
+        return new luma.Model(
+            gl,
+            Object.assign({}, this.getShaders(), {
+                id: this.props.id,
+                geometry: new luma.Geometry({
+                    drawMode: 0x0004, //GL.TRIANGLES,
+                    vertexCount: this.props.verticesBuffer.length / 3,
+                }),
+                isInstanced: false,
+            })
+        );
+    }
+
+    draw(opts) {
+        const { uniforms, moduleParameters } = opts;
+        const { model, disablePicking } = this.state;
+
+        if (moduleParameters.pickingActive && disablePicking) {
+            return;
+        }
+
+        const generalUniforms = {
+            showDepth: state.flowLayerData.showDepth,
+            depthScale: state.flowLayerData.depthScale,
+            time: state.flowLayerData.time
+        };
+
+        // Render the image
+        if (model) {
+            model.setUniforms({ uniforms, ...generalUniforms }).draw();
+        }
+    }
+
+    _getCoordinateUniforms() {
+        return {
+            coordinateConversion: 0,
+        };
+    }
+}
+
+DFSULayer.layerName = "DFSULayer";
+
+
+// 5. DFS Layer Shaders
+// =================================================================================
+
+function getVertexShader() {
+    return `#version 300 es
+#define SHADER_NAME bitmap-layer-vertex-shader
+
+varying vec2 pos;
+
+attribute vec3 positions;
+attribute float dfs_values_a;
+attribute float dfs_values_b;
+
+uniform bool showDepth;
+uniform float depthScale;
+uniform float time;
+
+varying float dfs_value_a;
+varying float dfs_value_b;
+
+void main(void) {
+    dfs_value_a = dfs_values_a;
+    dfs_value_b = dfs_values_b;
+
+    vec3 center = project_position(positions);
+
+    if (showDepth) {
+        center.z = dfs_value_a * depthScale;
+    }
+
+    pos = center.xy;
+    gl_Position = project_common_position_to_clipspace(vec4(center, 1.0));
+}
+`;
+}
+
+function getFragmentShader() {
+    return `#version 300 es
+#define SHADER_NAME bitmap-layer-fragment-shader
+
+#ifdef GL_ES
+precision highp float;
+#endif
+
+varying vec2 pos;
+
+uniform float time;
+
+varying float dfs_value_a;
+varying float dfs_value_b;
+
+//
+// Description : Array and textureless GLSL 2D simplex noise function.
+//      Author : Ian McEwan, Ashima Arts.
+//  Maintainer : stegu
+//     Lastmod : 20110822 (ijm)
+//     License : Copyright (C) 2011 Ashima Arts. All rights reserved.
+//               Distributed under the MIT License. See LICENSE file.
+//               https://github.com/ashima/webgl-noise
+//               https://github.com/stegu/webgl-noise
+// 
+
+vec3 mod289(vec3 x) {
+  return x - floor(x * (1.0 / 289.0)) * 289.0;
+}
+
+vec2 mod289(vec2 x) {
+  return x - floor(x * (1.0 / 289.0)) * 289.0;
+}
+
+vec3 permute(vec3 x) {
+  return mod289(((x*34.0)+10.0)*x);
+}
+
+float snoise(vec2 v)
+  {
+  const vec4 C = vec4(0.211324865405187,  // (3.0-sqrt(3.0))/6.0
+                      0.366025403784439,  // 0.5*(sqrt(3.0)-1.0)
+                     -0.577350269189626,  // -1.0 + 2.0 * C.x
+                      0.024390243902439); // 1.0 / 41.0
+// First corner
+  vec2 i  = floor(v + dot(v, C.yy) );
+  vec2 x0 = v -   i + dot(i, C.xx);
+
+// Other corners
+  vec2 i1;
+  //i1.x = step( x0.y, x0.x ); // x0.x > x0.y ? 1.0 : 0.0
+  //i1.y = 1.0 - i1.x;
+  i1 = (x0.x > x0.y) ? vec2(1.0, 0.0) : vec2(0.0, 1.0);
+  // x0 = x0 - 0.0 + 0.0 * C.xx ;
+  // x1 = x0 - i1 + 1.0 * C.xx ;
+  // x2 = x0 - 1.0 + 2.0 * C.xx ;
+  vec4 x12 = x0.xyxy + C.xxzz;
+  x12.xy -= i1;
+
+// Permutations
+  i = mod289(i); // Avoid truncation effects in permutation
+  vec3 p = permute( permute( i.y + vec3(0.0, i1.y, 1.0 ))
+		+ i.x + vec3(0.0, i1.x, 1.0 ));
+
+  vec3 m = max(0.5 - vec3(dot(x0,x0), dot(x12.xy,x12.xy), dot(x12.zw,x12.zw)), 0.0);
+  m = m*m ;
+  m = m*m ;
+
+// Gradients: 41 points uniformly over a line, mapped onto a diamond.
+// The ring size 17*17 = 289 is close to a multiple of 41 (41*7 = 287)
+
+  vec3 x = 2.0 * fract(p * C.www) - 1.0;
+  vec3 h = abs(x) - 0.5;
+  vec3 ox = floor(x + 0.5);
+  vec3 a0 = x - ox;
+
+// Normalise gradients implicitly by scaling m
+// Approximation of: m *= inversesqrt( a0*a0 + h*h );
+  m *= 1.79284291400159 - 0.85373472095314 * ( a0*a0 + h*h );
+
+// Compute final noise value at P
+  vec3 g;
+  g.x  = a0.x  * x0.x  + h.x  * x0.y;
+  g.yz = a0.yz * x12.xz + h.yz * x12.yw;
+  return 130.0 * dot(m, g);
+}
+
+
+float map(float value, float inMin, float inMax, float outMin, float outMax) {
+  return outMin + (outMax - outMin) * (value - inMin) / (inMax - inMin);
+}
+
+void main(void) {
+	float noiseScaleX = 200.0;
+	float noiseScaleY = 200.0;
+	float flowSpeed = 1000.0;
+	float timeScaling = 0.01;
+	float remapMin = 0.3;
+	float remapMax = 0.7;
+
+	float colorPhase1 = map(snoise(vec2(pos.x * noiseScaleX + fract(time * timeScaling)        * -dfs_value_a * flowSpeed, pos.y * noiseScaleY + fract(time * timeScaling)        * -dfs_value_b * flowSpeed)), 0.0, 1.0, remapMin, remapMax);
+	float colorPhase2 = map(snoise(vec2(pos.x * noiseScaleX + fract(time * timeScaling + 0.3333) * -dfs_value_a * flowSpeed, pos.y * noiseScaleY + fract(time * timeScaling + 0.3333) * -dfs_value_b * flowSpeed)), 0.0, 1.0, remapMin, remapMax);
+	float colorPhase3 = map(snoise(vec2(pos.x * noiseScaleX + fract(time * timeScaling + 0.6666) * -dfs_value_a * flowSpeed, pos.y * noiseScaleY + fract(time * timeScaling + 0.6666) * -dfs_value_b * flowSpeed)), 0.0, 1.0, remapMin, remapMax);
+
+	float color = (colorPhase1 + colorPhase2 + colorPhase3) / 3.0;
+
+	gl_FragColor = vec4(0.0, 0.0, color + 0.2, 0.8);
+}
+`;
+}
+
+
+
+// function getFragmentShader() {
+//     return `#version 300 es
+// #define SHADER_NAME bitmap-layer-fragment-shader
+
+// #ifdef GL_ES
+// precision highp float;
+// #endif
+
+// varying vec2 pos;
+
+// uniform float time;
+
+// varying float dfs_value_a;
+// varying float dfs_value_b;
+
+// // 2D Random
+// float random (in vec2 st) {
+//     return fract(sin(dot(st.xy,
+//                          vec2(12.9898,78.233)))
+//                  * 43758.5453123);
+// }
+
+// // 2D Noise based on Morgan McGuire @morgan3d
+// // https://www.shadertoy.com/view/4dS3Wd
+// float noise (in vec2 st) {
+//     vec2 i = floor(st);
+//     vec2 f = fract(st);
+
+//     // Four corners in 2D of a tile
+//     float a = random(i);
+//     float b = random(i + vec2(1.0, 0.0));
+//     float c = random(i + vec2(0.0, 1.0));
+//     float d = random(i + vec2(1.0, 1.0));
+
+//     // Smooth Interpolation
+
+//     // Cubic Hermine Curve.  Same as SmoothStep()
+//     vec2 u = f*f*(3.0-2.0*f);
+//     // u = smoothstep(0.,1.,f);
+
+//     // Mix 4 coorners percentages
+//     return mix(a, b, u.x) +
+//             (c - a)* u.y * (1.0 - u.x) +
+//             (d - b) * u.x * u.y;
+// }
+
+
+
+// void main(void) {
+// 	float noiseScaleX = 100.0;
+// 	float noiseScaleY = 100.0;
+// 	float flowSpeed = 400.0;
+// 	float timeScaling = 0.01;
+
+// 	float colorPhase1 = noise(vec2(pos.x * noiseScaleX + fract(time * timeScaling)        * -dfs_value_a * flowSpeed, pos.y * noiseScaleY + fract(time * timeScaling)        * -dfs_value_b * flowSpeed));
+// 	float colorPhase2 = noise(vec2(pos.x * noiseScaleX + fract(time * timeScaling + 0.33) * -dfs_value_a * flowSpeed, pos.y * noiseScaleY + fract(time * timeScaling + 0.33) * -dfs_value_b * flowSpeed));
+// 	float colorPhase3 = noise(vec2(pos.x * noiseScaleX + fract(time * timeScaling + 0.66) * -dfs_value_a * flowSpeed, pos.y * noiseScaleY + fract(time * timeScaling + 0.66) * -dfs_value_b * flowSpeed));
+// 	float color = (colorPhase1 + colorPhase2 + colorPhase3) / 3.0;
+
+// 	gl_FragColor = vec4(0.0, 0.0, color, 1.0);
+// }
+// `;
+// }
+
+
+// function getFragmentShader() {
+//     return `#version 300 es
+// #define SHADER_NAME bitmap-layer-fragment-shader
+
+// #ifdef GL_ES
+// precision highp float;
+// #endif
+
+// varying vec2 pos;
+
+// uniform float time;
+
+// varying float dfs_value_a;
+// varying float dfs_value_b;
+
+// // 2D Random
+// float random (in vec2 st) {
+//     return fract(sin(dot(st.xy,
+//                          vec2(12.9898,78.233)))
+//                  * 43758.5453123);
+// }
+
+// // 2D Noise based on Morgan McGuire @morgan3d
+// // https://www.shadertoy.com/view/4dS3Wd
+// float noise (in vec2 st) {
+//     vec2 i = floor(st);
+//     vec2 f = fract(st);
+
+//     // Four corners in 2D of a tile
+//     float a = random(i);
+//     float b = random(i + vec2(1.0, 0.0));
+//     float c = random(i + vec2(0.0, 1.0));
+//     float d = random(i + vec2(1.0, 1.0));
+
+//     // Smooth Interpolation
+
+//     // Cubic Hermine Curve.  Same as SmoothStep()
+//     vec2 u = f*f*(3.0-2.0*f);
+//     // u = smoothstep(0.,1.,f);
+
+//     // Mix 4 coorners percentages
+//     return mix(a, b, u.x) +
+//             (c - a)* u.y * (1.0 - u.x) +
+//             (d - b) * u.x * u.y;
+// }
+
+
+// void main(void) {
+// 	// float colorR = noise(vec2(pos.x * 80.0 + time, pos.y * 80.0));
+// 	// float colorG = noise(vec2(pos.x * 80.0, pos.y * 80.0 + time));
+// 	// gl_FragColor = vec4(colorR, colorG, 0.0, 1.0);
+
+// 	// float colorR = dfs_value_a;
+// 	// float colorG = dfs_value_b;
+// 	// gl_FragColor = vec4(colorR, colorG, 0.0, 1.0);
+
+// 	// float colorR = noise(vec2(pos.x * 100.0 + fract(time) * dfs_value_a, pos.y * 100.0 + fract(time) * dfs_value_b));
+// 	// //float colorG = noise(vec2(pos.x * 100.0 + fract(time) * dfs_value_a, pos.y * 100.0 + fract(time) * dfs_value_b));
+// 	// gl_FragColor = vec4(colorR, 0.0, 0.0, 1.0);
+
+// 	float colorR = noise(vec2(pos.x + time * dfs_value_a, pos.y + time * dfs_value_b));
+// 	//float colorG = noise(vec2(pos.x + time * dfs_value_a, pos.y + time * dfs_value_b));
+// 	gl_FragColor = vec4(0.0, 0.0, colorR, 1.0);
+// }
+// `;
+// }
+
+			main();
+		</script>
+	</body>
+</html>
