@@ -31,7 +31,9 @@
 					time: 0,
 					uAttributeData: null,
 					vAttributeData: null,
-					shouldColorVelocity: false
+					sigWaveHeightData: null,
+					shouldColorVelocity: false,
+					shouldColorSigWaveH: false
 				}
 			};
 
@@ -77,6 +79,7 @@
 				const timestepData = await fetchTimeStepData();
 				state.flowLayerData.uAttributeData = timestepData.uBuffer;
 				state.flowLayerData.vAttributeData = timestepData.vBuffer;
+				state.flowLayerData.sigWaveHeightData = timestepData.sigHBuffer;
 			}
 
 			function update(time) {
@@ -111,6 +114,7 @@
 						ImGui.Checkbox("Show tiles", (_ = state.mapOptions.showTiles) => state.mapOptions.showTiles = _);
 						ImGui.Checkbox("Show flow map", (_ = state.mapOptions.showFlowMap) => state.mapOptions.showFlowMap = _);
 						ImGui.Checkbox("Color velocity", (_ = state.flowLayerData.shouldColorVelocity) => state.flowLayerData.shouldColorVelocity = _);
+						ImGui.Checkbox("Color Sig. Wave Height", (_ = state.flowLayerData.shouldColorSigWaveH) => state.flowLayerData.shouldColorSigWaveH = _);
 					ImGui.End();
 				ImGui.EndFrame();
 
@@ -163,8 +167,10 @@
 						verticesBuffer: state.flowLayerData.vertices,
 						dfsValuesBufferA: state.flowLayerData.uAttributeData,
 						dfsValuesBufferB: state.flowLayerData.vAttributeData,
+						dfsParameterBuffer: state.flowLayerData.sigWaveHeightData,
 						time: state.flowLayerData.time,
 						shouldColorVelocity: state.flowLayerData.shouldColorVelocity,
+						shouldColorSigWaveH: state.flowLayerData.shouldColorSigWaveH,
 						parameters: { depthTest: true }
 					}));
 				}
@@ -193,13 +199,15 @@
 				const responseV = await fetch('area-full-timestep-0-v.bin', { method: "GET" });
 				const vArrayBuffer = await responseV.arrayBuffer();
 				const vBuffer = new Float32Array(vArrayBuffer);
-				// for (let i = 0; i < vBuffer.length; ++i) {
-				// 	vBuffer[i] = 0
-				// }
+
+				const responseSigH = await fetch('area-full-timestep-0-sigH.bin', { method: "GET" });
+				const sigHArrayBuffer = await responseSigH.arrayBuffer();
+				const sigHBuffer = new Float32Array(sigHArrayBuffer);
 
 				return {
 					uBuffer: expandBuffer(uBuffer),
 					vBuffer: expandBuffer(vBuffer),
+					sigHBuffer: expandBuffer(sigHBuffer)
 				};
 			}
 
@@ -246,6 +254,12 @@ class DFSULayer extends deck.Layer {
                 update: (attribute) => (attribute.value = this.state.mesh.dfs_values_b),
                 noAlloc,
             },
+            dfs_parameter: {
+                size: 1,
+                type: 0x1406, // luma.GL.FLOAT,
+                update: (attribute) => (attribute.value = this.state.mesh.dfs_parameter),
+                noAlloc,
+            },
         });
 
         const mesh = this._createMesh();
@@ -268,10 +282,11 @@ class DFSULayer extends deck.Layer {
 
         const attributeManager = this.getAttributeManager();
 
-        if (props.dfsValuesBufferA !== oldProps.dfsValuesBufferA || props.dfsValuesBufferB !== oldProps.dfsValuesBufferB) {
+        if (props.dfsValuesBufferA !== oldProps.dfsValuesBufferA || props.dfsValuesBufferB !== oldProps.dfsValuesBufferB || props.dfsParameterBuffer !== oldProps.dfsParameterBuffer) {
             const mesh = this._createMesh();
             attributeManager.invalidate("dfs_values_a");
             attributeManager.invalidate("dfs_values_b");
+            attributeManager.invalidate("dfs_parameter");
             this.setState({ mesh });
         }
 
@@ -290,13 +305,14 @@ class DFSULayer extends deck.Layer {
     }
 
     _createMesh() {
-        const { verticesBuffer, dfsValuesBufferA, dfsValuesBufferB } = this.props;
+        const { verticesBuffer, dfsValuesBufferA, dfsValuesBufferB, dfsParameterBuffer } = this.props;
 
         return {
             vertexCount: verticesBuffer.length / 3,
             positions: verticesBuffer,
             dfs_values_a: dfsValuesBufferA,
             dfs_values_b: dfsValuesBufferB,
+            dfs_parameter: dfsParameterBuffer
         };
     }
 
@@ -330,7 +346,8 @@ class DFSULayer extends deck.Layer {
             showDepth: state.flowLayerData.showDepth,
             depthScale: state.flowLayerData.depthScale,
             time: state.flowLayerData.time,
-            shouldColorVelocity: state.flowLayerData.shouldColorVelocity
+            shouldColorVelocity: state.flowLayerData.shouldColorVelocity,
+            shouldColorSigWaveH: state.flowLayerData.shouldColorSigWaveH
         };
 
         // Render the image
@@ -361,18 +378,22 @@ varying vec2 pos;
 attribute vec3 positions;
 attribute float dfs_values_a;
 attribute float dfs_values_b;
+attribute float dfs_parameter;
 
 uniform bool showDepth;
 uniform float depthScale;
 uniform float time;
 uniform bool shouldColorVelocity;
+uniform bool shouldColorSigWaveH;
 
 varying float dfs_value_a;
 varying float dfs_value_b;
+varying float dfs_param;
 
 void main(void) {
     dfs_value_a = dfs_values_a;
     dfs_value_b = dfs_values_b;
+    dfs_param = dfs_parameter;
 
     vec3 center = project_position(positions);
 
@@ -398,9 +419,11 @@ varying vec2 pos;
 
 uniform float time;
 uniform bool shouldColorVelocity;
+uniform bool shouldColorSigWaveH;
 
 varying float dfs_value_a;
 varying float dfs_value_b;
+varying float dfs_param;
 
 //
 // Description : Array and textureless GLSL 2D simplex noise function.
@@ -513,6 +536,22 @@ void main(void) {
 		}
 
 		gl_FragColor = vec4(velocityColor * color * 1.5, 0.8);
+	} else if (shouldColorSigWaveH) { 
+		vec3 paramColor;
+		if (dfs_param < 0.33) {
+			vec3 startColor = vec3(0.0, 0.0, 1.0);
+			vec3 endColor = vec3(0.0, 1.0, 0.0);
+			paramColor = mix(startColor, endColor, dfs_param * 3.0);
+		} else if (dfs_param < 0.66) {
+			vec3 startColor = vec3(0.0, 1.0, 0.0);
+			vec3 endColor = vec3(1.0, 1.0, 0.0);
+			paramColor = mix(startColor, endColor, (dfs_param - 0.33) * 3.0);
+		} else {
+			vec3 startColor = vec3(1.0, 1.0, 0.0);
+			vec3 endColor = vec3(1.0, 0.0, 0.0);
+			paramColor = mix(startColor, endColor, (dfs_param - 0.66) * 3.0);
+		}
+		gl_FragColor = vec4(paramColor * color * 1.5, 0.8);
 	} else {
 		gl_FragColor = vec4(0.0, 0.0, color + 0.2, 1.0);
 	}
