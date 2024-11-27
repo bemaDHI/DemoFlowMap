@@ -30,7 +30,8 @@
 					depthScale: 1,
 					time: 0,
 					uAttributeData: null,
-					vAttributeData: null
+					vAttributeData: null,
+					shouldColorVelocity: false
 				}
 			};
 
@@ -43,7 +44,7 @@
 					initialViewState: {
 						latitude: -36.8509,
 						longitude: 174.7645,
-						zoom: 9,
+						zoom: 8,
 						bearing: 0,
 						pitch: 30,
 						minPitch: 0,
@@ -109,6 +110,7 @@
 					ImGui.Begin("Debug");
 						ImGui.Checkbox("Show tiles", (_ = state.mapOptions.showTiles) => state.mapOptions.showTiles = _);
 						ImGui.Checkbox("Show flow map", (_ = state.mapOptions.showFlowMap) => state.mapOptions.showFlowMap = _);
+						ImGui.Checkbox("Color velocity", (_ = state.flowLayerData.shouldColorVelocity) => state.flowLayerData.shouldColorVelocity = _);
 					ImGui.End();
 				ImGui.EndFrame();
 
@@ -162,6 +164,7 @@
 						dfsValuesBufferA: state.flowLayerData.uAttributeData,
 						dfsValuesBufferB: state.flowLayerData.vAttributeData,
 						time: state.flowLayerData.time,
+						shouldColorVelocity: state.flowLayerData.shouldColorVelocity,
 						parameters: { depthTest: true }
 					}));
 				}
@@ -326,7 +329,8 @@ class DFSULayer extends deck.Layer {
         const generalUniforms = {
             showDepth: state.flowLayerData.showDepth,
             depthScale: state.flowLayerData.depthScale,
-            time: state.flowLayerData.time
+            time: state.flowLayerData.time,
+            shouldColorVelocity: state.flowLayerData.shouldColorVelocity
         };
 
         // Render the image
@@ -361,6 +365,7 @@ attribute float dfs_values_b;
 uniform bool showDepth;
 uniform float depthScale;
 uniform float time;
+uniform bool shouldColorVelocity;
 
 varying float dfs_value_a;
 varying float dfs_value_b;
@@ -392,6 +397,7 @@ precision highp float;
 varying vec2 pos;
 
 uniform float time;
+uniform bool shouldColorVelocity;
 
 varying float dfs_value_a;
 varying float dfs_value_b;
@@ -478,16 +484,47 @@ void main(void) {
 	float noiseScaleY = 200.0;
 	float flowSpeed = 1000.0;
 	float timeScaling = 0.01;
-	float remapMin = 0.3;
-	float remapMax = 0.7;
+	float remapMin = 0.4;
+	float remapMax = 0.6;
 
 	float colorPhase1 = map(snoise(vec2(pos.x * noiseScaleX + fract(time * timeScaling)        * -dfs_value_a * flowSpeed, pos.y * noiseScaleY + fract(time * timeScaling)        * -dfs_value_b * flowSpeed)), 0.0, 1.0, remapMin, remapMax);
 	float colorPhase2 = map(snoise(vec2(pos.x * noiseScaleX + fract(time * timeScaling + 0.3333) * -dfs_value_a * flowSpeed, pos.y * noiseScaleY + fract(time * timeScaling + 0.3333) * -dfs_value_b * flowSpeed)), 0.0, 1.0, remapMin, remapMax);
 	float colorPhase3 = map(snoise(vec2(pos.x * noiseScaleX + fract(time * timeScaling + 0.6666) * -dfs_value_a * flowSpeed, pos.y * noiseScaleY + fract(time * timeScaling + 0.6666) * -dfs_value_b * flowSpeed)), 0.0, 1.0, remapMin, remapMax);
 
+
 	float color = (colorPhase1 + colorPhase2 + colorPhase3) / 3.0;
 
-	gl_FragColor = vec4(0.0, 0.0, color + 0.2, 0.8);
+	if (shouldColorVelocity)
+	{
+		float velocity = length(vec2(dfs_value_a, dfs_value_a));
+		vec3 velocityColor;
+		if (velocity < 0.33) {
+			vec3 startColor = vec3(0.0, 0.0, 1.0);
+			vec3 endColor = vec3(0.0, 1.0, 0.0);
+			velocityColor = mix(startColor, endColor, velocity * 3.0);
+		} else if (velocity < 0.66) {
+			vec3 startColor = vec3(0.0, 1.0, 0.0);
+			vec3 endColor = vec3(1.0, 1.0, 0.0);
+			velocityColor = mix(startColor, endColor, (velocity - 0.33) * 3.0);
+		} else {
+			vec3 startColor = vec3(1.0, 1.0, 0.0);
+			vec3 endColor = vec3(1.0, 0.0, 0.0);
+			velocityColor = mix(startColor, endColor, (velocity - 0.66) * 3.0);
+		}
+
+		gl_FragColor = vec4(velocityColor * color * 1.5, 0.8);
+	} else {
+		gl_FragColor = vec4(0.0, 0.0, color + 0.2, 1.0);
+	}
+
+
+	// if (velocity < 0.1) {
+	// 	gl_FragColor = vec4(0.0, 0.0, color + 0.2, 0.8);
+	// } else if (velocity < 0.5) {
+	// 	gl_FragColor = vec4(0.0, color + 0.2, 0.0, 0.8);
+	// } else {
+	// 	gl_FragColor = vec4(color + 0.2, 0.0, 0.0, 0.8);
+	// }
 }
 `;
 }
